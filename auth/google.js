@@ -1,6 +1,7 @@
 const passport = require("passport");
 const GoogleStrategy = require("passport-google-oauth20").Strategy;
 const User = require("../models/user");
+const RefreshToken = require("../models/refreshToken");
 require("dotenv").config();
 
 passport.serializeUser((user, done) => {
@@ -18,29 +19,36 @@ passport.use(
       clientID: process.env.GOOGLE_CLIENT_ID,
       clientSecret: process.env.GOOGLE_CLIENT_SECRET,
       callbackURL: "/auth/google/callback",
-      scope: ["profile", "email", "https://www.googleapis.com/auth/gmail.send"],
-      accessType: "offline",
-      prompt: "consent",
+      passReqToCallback: true,
     },
-    async (accessToken, refreshToken, profile, done) => {
-      const refreshTokenManual = process.env.REFRESH_TOKEN_MANUAL; // only for vaziransari9@gmail.com
+    async (req, accessToken, refreshToken, profile, done) => {
+      console.log("accessToken:", accessToken);
+      console.log("refreshToken:", refreshToken);
+
       let user = await User.findOne({ email: profile.emails[0].value });
+      console.log(user);
       if (!user) {
         user = new User({
           email: profile.emails[0].value,
           google: {
             id: profile.id,
-            accessToken,
-            refreshToken: refreshToken || refreshTokenManual, // manual refresh token only for (vaziransari9@gmail.com)
+            accessToken: accessToken,
           },
         });
+        await user.save();
       } else {
           user.google.accessToken = accessToken;
-          if (refreshToken) {
-            user.google.refreshToken = refreshToken;
-          }
+          await user.save();
       }
-      await user.save();
+      if (refreshToken) {
+        await RefreshToken.findOneAndUpdate(
+          { userId: user._id },
+          { token: refreshToken },
+          { upsert: true, new: true }
+        );
+      }
+      else console.log("No refresh token received");
+
       done(null, user);
     }
   )

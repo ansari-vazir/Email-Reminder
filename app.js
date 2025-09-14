@@ -6,14 +6,28 @@ const session = require("express-session");
 const passport = require("passport");
 const authRoutes = require("./routes/auth");
 const cron = require("node-cron");
+const RefreshToken = require("./models/refreshToken");
 const nodemailer = require("nodemailer");
 const expressLayouts = require("express-ejs-layouts");
 const Reminder = require("./models/reminder");
 const User = require("./models/user");
+const refresh = require("passport-oauth2-refresh");
 require("./auth/google");
 
-
 const app = express();
+// Session setup
+app.use(
+  session({
+    secret: process.env.SESSION_SECRET,
+    resave: false,
+    saveUninitialized: true,
+  })
+);
+
+const googleStrategy = passport._strategy("google");
+if (googleStrategy) {
+  refresh.use("google", googleStrategy);
+}
 
 // Middleware
 app.use(express.urlencoded({ extended: true }));
@@ -35,14 +49,7 @@ mongoose
     console.error("❌ MongoDB connection error:", err);
     process.exit(1);
   });
-// Session setup
-app.use(
-  session({
-    secret: process.env.SESSION_SECRET,
-    resave: false,
-    saveUninitialized: true,
-  })
-);
+
 app.use(passport.initialize());
 app.use(passport.session());
 app.use("/auth", authRoutes);
@@ -54,21 +61,56 @@ app.use((req, res, next) => {
 });
 
 
-function createOAuthTransport(user) {
-  console.log("Using refresh token:", user.google);
 
-  return nodemailer.createTransport({
-    service: "gmail",
-    auth: {
-      type: "OAuth2",
-      user: user.email,
-      clientId: process.env.GOOGLE_CLIENT_ID,
-      clientSecret: process.env.GOOGLE_CLIENT_SECRET,
-      refreshToken: user.google.refreshToken,
-      accessToken: user.google.accessToken,
-    },
-  });
-}
+const transporter = nodemailer.createTransport({
+  service: "gmail",
+  auth: {
+    type: "OAuth2",
+    clientId: process.env.GOOGLE_CLIENT_ID,
+    clientSecret: process.env.GOOGLE_CLIENT_SECRET,
+  },
+});
+
+transporter.set("oauth2_provision_cb", async (userEmail, renew, callback) => {
+  try {
+    const user = await User.findOne({ email: userEmail });
+    if (!user) return callback(new Error("User not found"));
+
+    const tokenDoc = await RefreshToken.findOne({ userId: user._id });
+    if (!tokenDoc) return callback(new Error("Refresh token not found"));
+
+    refresh.requestNewAccessToken(
+      "google",
+      tokenDoc.token,
+      async (err, accessToken, newRefreshToken) => {
+        if (err || !accessToken) {
+          console.error("Failed to refresh token:", err);
+          return callback(err);
+        }
+        else { console.log("Access token refreshed");
+        }
+
+        // Save new refresh token if rotation occurred
+        if (newRefreshToken) {
+          tokenDoc.token = newRefreshToken;
+          await tokenDoc.save().catch(e =>
+            console.error("Error saving new refresh token:", e)
+          );
+        }
+
+        // Update user’s access token
+        user.google.accessToken = accessToken;
+        await user.save();
+
+        callback(null, accessToken);
+      }
+    );
+  } catch (error) {
+    console.error("Error in oauth2_provision_cb:", error);
+    callback(error);
+  }
+});
+
 
 // Routes
 app.get("/", (req, res) => {
@@ -131,21 +173,31 @@ cron.schedule("* * * * *", async () => {
       sent: false,
     }).populate("sender");
     if (reminders.length > 0) {  
-      const transporter = createOAuthTransport(reminders[0].sender);
+      // const transporter = createOAuthTransport(reminders[0].sender);
       for (const reminder of reminders) {
-        await transporter.sendMail({
+        try{
+          await transporter.sendMail({
           from: reminder.sender.email,
           to: reminder.email,
           subject: "Reminder",
           text: reminder.message,
-        });
-
-        reminder.sent = true;
-        await reminder.save();
+          auth: {
+            user: reminder.sender.email,
+          },
+          });
+          reminder.sent = true;
+          await reminder.save();
+          console.log(`Reminder sent to ${reminder.email} from user ${reminder.sender.email}`);
+        }catch (error) {
+          console.error(
+            `Error sending reminder to ${reminder.email} for user ${reminder.sender.email}:`,
+            error
+          );
+        }
       }
     }
   } catch (error) {
-    console.error("Error sending reminders:", error);
+    console.error("Error processing reminders:", error);
   }
 });
 
