@@ -60,58 +60,6 @@ app.use((req, res, next) => {
   next();
 });
 
-
-
-const transporter = nodemailer.createTransport({
-  service: "gmail",
-  auth: {
-    type: "OAuth2",
-    clientId: process.env.GOOGLE_CLIENT_ID,
-    clientSecret: process.env.GOOGLE_CLIENT_SECRET,
-  },
-});
-
-transporter.set("oauth2_provision_cb", async (userEmail, renew, callback) => {
-  try {
-    const user = await User.findOne({ email: userEmail });
-    if (!user) return callback(new Error("User not found"));
-
-    const tokenDoc = await RefreshToken.findOne({ userId: user._id });
-    if (!tokenDoc) return callback(new Error("Refresh token not found"));
-
-    refresh.requestNewAccessToken(
-      "google",
-      tokenDoc.token,
-      async (err, accessToken, newRefreshToken) => {
-        if (err || !accessToken) {
-          console.error("Failed to refresh token:", err);
-          return callback(err);
-        }
-        else { console.log("Access token refreshed");
-        }
-
-        // Save new refresh token if rotation occurred
-        if (newRefreshToken) {
-          tokenDoc.token = newRefreshToken;
-          await tokenDoc.save().catch(e =>
-            console.error("Error saving new refresh token:", e)
-          );
-        }
-
-        // Update user’s access token
-        user.google.accessToken = accessToken;
-        await user.save();
-
-        callback(null, accessToken);
-      }
-    );
-  } catch (error) {
-    console.error("Error in oauth2_provision_cb:", error);
-    callback(error);
-  }
-});
-
-
 // Routes
 app.get("/", (req, res) => {
   res.render("index", {
@@ -168,36 +116,74 @@ app.post("/schedule", async (req, res) => {
 app.get("/api/run-cron", async (req, res) => {
   try {
     const now = new Date();
+    console.log("🔄 Running cron at:", now);
+
     const reminders = await Reminder.find({
       scheduledTime: { $lte: now },
       sent: false,
     }).populate("sender");
 
+    console.log(`📌 Found ${reminders.length} reminders`);
+
     let sentCount = 0;
 
-    if (reminders.length > 0) {
-      for (const reminder of reminders) {
-        try {
-          await transporter.sendMail({
-            from: reminder.sender.email,
-            to: reminder.email,
-            subject: "Reminder",
-            text: reminder.message,
-            auth: { user: reminder.sender.email },
-          });
-
-          reminder.sent = true;
-          await reminder.save();
-          sentCount++;
-          console.log(
-            `✅ Reminder sent to ${reminder.email} from ${reminder.sender.email}`
-          );
-        } catch (error) {
-          console.error(
-            `❌ Error sending reminder to ${reminder.email} for user ${reminder.sender.email}:`,
-            error
-          );
+    for (const reminder of reminders) {
+      try {
+        const tokenDoc = await RefreshToken.findOne({ userId: reminder.sender._id });
+        if (!tokenDoc) {
+          console.error("❌ No refresh token for", reminder.sender.email);
+          continue;
         }
+
+        // Refresh the access token
+        const newTokens = await new Promise((resolve, reject) => {
+          refresh.requestNewAccessToken(
+            "google",
+            tokenDoc.token,
+            (err, accessToken, newRefreshToken) => {
+              if (err || !accessToken) return reject(err);
+              resolve({ accessToken, newRefreshToken });
+            }
+          );
+        });
+
+        // Save rotated refresh token if provided
+        if (newTokens.newRefreshToken) {
+          tokenDoc.token = newTokens.newRefreshToken;
+          await tokenDoc.save();
+          console.log("♻️ Refresh token rotated and saved");
+        }
+
+        // Create transporter for this user
+        const userTransporter = nodemailer.createTransport({
+          service: "gmail",
+          auth: {
+            type: "OAuth2",
+            user: reminder.sender.email,
+            clientId: process.env.GOOGLE_CLIENT_ID,
+            clientSecret: process.env.GOOGLE_CLIENT_SECRET,
+            refreshToken: tokenDoc.token,
+            accessToken: newTokens.accessToken,
+          },
+        });
+
+        // Send mail
+        await userTransporter.sendMail({
+          from: reminder.sender.email,
+          to: reminder.email,
+          subject: "Reminder",
+          text: reminder.message,
+        });
+
+        reminder.sent = true;
+        await reminder.save();
+        sentCount++;
+        console.log(`📨 Sent reminder to ${reminder.email}`);
+      } catch (err) {
+        console.error(
+          `❌ Error sending reminder for ${reminder.email} (user ${reminder.sender.email}):`,
+          err
+        );
       }
     }
 
@@ -207,7 +193,7 @@ app.get("/api/run-cron", async (req, res) => {
       remindersSent: sentCount,
     });
   } catch (error) {
-    console.error("❌ Error processing reminders:", error);
+    console.error("❌ Error in /api/run-cron:", error);
     res.status(500).json({ error: "Failed to process reminders" });
   }
 });
