@@ -165,7 +165,7 @@ app.post("/schedule", async (req, res) => {
 });
 
 // Cron job to check and send reminders
-cron.schedule("* * * * *", async () => {
+app.get("/api/run-cron", async (req, res) => {
   try {
     const now = new Date();
     const reminders = await Reminder.find({
