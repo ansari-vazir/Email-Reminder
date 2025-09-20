@@ -17,8 +17,8 @@ router.get(
     scope: ['profile', 'email', 'https://mail.google.com/'],
     accessType: 'offline',
     prompt: 'consent',
-    failureRedirect: "/",
-    successRedirect: "/",
+    failureRedirect: "https://email-scheduler-sk2o.onrender.com",
+    successRedirect: "https://email-scheduler-sk2o.onrender.com/schedule",
   })
 );
 
