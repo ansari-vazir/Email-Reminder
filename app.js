@@ -172,34 +172,46 @@ app.get("/api/run-cron", async (req, res) => {
       scheduledTime: { $lte: now },
       sent: false,
     }).populate("sender");
-    if (reminders.length > 0) {  
-      // const transporter = createOAuthTransport(reminders[0].sender);
+
+    let sentCount = 0;
+
+    if (reminders.length > 0) {
       for (const reminder of reminders) {
-        try{
+        try {
           await transporter.sendMail({
-          from: reminder.sender.email,
-          to: reminder.email,
-          subject: "Reminder",
-          text: reminder.message,
-          auth: {
-            user: reminder.sender.email,
-          },
+            from: reminder.sender.email,
+            to: reminder.email,
+            subject: "Reminder",
+            text: reminder.message,
+            auth: { user: reminder.sender.email },
           });
+
           reminder.sent = true;
           await reminder.save();
-          console.log(`Reminder sent to ${reminder.email} from user ${reminder.sender.email}`);
-        }catch (error) {
+          sentCount++;
+          console.log(
+            `✅ Reminder sent to ${reminder.email} from ${reminder.sender.email}`
+          );
+        } catch (error) {
           console.error(
-            `Error sending reminder to ${reminder.email} for user ${reminder.sender.email}:`,
+            `❌ Error sending reminder to ${reminder.email} for user ${reminder.sender.email}:`,
             error
           );
         }
       }
     }
+
+    res.json({
+      message: "Cron executed",
+      remindersProcessed: reminders.length,
+      remindersSent: sentCount,
+    });
   } catch (error) {
-    console.error("Error processing reminders:", error);
+    console.error("❌ Error processing reminders:", error);
+    res.status(500).json({ error: "Failed to process reminders" });
   }
 });
+
 
 const PORT = process.env.PORT || 5000;
 app.listen(PORT, () => {
